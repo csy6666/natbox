@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -78,5 +79,41 @@ func TestSecurityHeaders(t *testing.T) {
 		if got := response.Header().Get(key); got != want {
 			t.Fatalf("%s = %q, want %q", key, got, want)
 		}
+	}
+}
+
+func TestClassifyError(t *testing.T) {
+	tests := []struct {
+		name   string
+		err    error
+		code   string
+		status int
+	}{
+		{name: "invalid", err: errors.New("invalid port"), code: "invalid_request", status: http.StatusBadRequest},
+		{name: "conflict", err: errors.New("listen port already assigned"), code: "conflict", status: http.StatusConflict},
+		{name: "runtime", err: errors.New("incus start: exit status 1"), code: "runtime_error", status: http.StatusBadGateway},
+		{name: "internal", err: errors.New("database unavailable"), code: "internal_error", status: http.StatusInternalServerError},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			status, code := classifyError(test.err)
+			if status != test.status || code != test.code {
+				t.Fatalf("classifyError = (%d, %q), want (%d, %q)", status, code, test.status, test.code)
+			}
+		})
+	}
+}
+
+func TestVersionedAPIRewritesPath(t *testing.T) {
+	var got string
+	handler := versionedAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/containers", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent || got != "/api/containers" {
+		t.Fatalf("versioned API = status %d path %q", response.Code, got)
 	}
 }

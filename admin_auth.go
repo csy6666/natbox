@@ -54,11 +54,11 @@ func (a *adminAuth) status(w http.ResponseWriter) {
 
 func (a *adminAuth) login(w http.ResponseWriter, r *http.Request, record func(string, string)) {
 	if !a.enabled() {
-		writeStatus(w, http.StatusNotFound, "administrator login is disabled")
+		writeStatusCode(w, http.StatusNotFound, "auth_disabled", "administrator login is disabled")
 		return
 	}
 	if !a.allowAttempt(requestIP(r)) {
-		writeStatus(w, http.StatusTooManyRequests, "too many login attempts; retry later")
+		writeStatusCode(w, http.StatusTooManyRequests, "rate_limited", "too many login attempts; retry later")
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 8<<10)
@@ -68,7 +68,7 @@ func (a *adminAuth) login(w http.ResponseWriter, r *http.Request, record func(st
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil || !auth.VerifyPassword(a.hash, request.Password) {
 		a.failed(requestIP(r))
 		record("failure", "")
-		writeStatus(w, http.StatusUnauthorized, "invalid administrator credentials")
+		writeStatusCode(w, http.StatusUnauthorized, "invalid_credentials", "invalid administrator credentials")
 		return
 	}
 	a.clearFailure(requestIP(r))
@@ -77,7 +77,7 @@ func (a *adminAuth) login(w http.ResponseWriter, r *http.Request, record func(st
 		err = errRandomToken
 	}
 	if err != nil {
-		writeStatus(w, http.StatusInternalServerError, "could not create session")
+		writeStatusCode(w, http.StatusInternalServerError, "session_error", "could not create session")
 		return
 	}
 	a.mu.Lock()
@@ -104,7 +104,7 @@ func (a *adminAuth) me(w http.ResponseWriter, r *http.Request) {
 		write(w, envelope{Success: true, Data: map[string]any{"username": "admin", "csrfToken": session.CSRF, "expiresAt": session.ExpiresAt.UTC()}})
 		return
 	}
-	writeStatus(w, http.StatusUnauthorized, "authentication required")
+	writeStatusCode(w, http.StatusUnauthorized, "auth_required", "authentication required")
 }
 
 func (a *adminAuth) session(r *http.Request) (adminSession, bool) {

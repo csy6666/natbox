@@ -51,6 +51,11 @@ Natbox supports container creation, batch creation with duplicate-name preflight
 
 Important API paths:
 
+New integrations should use the stable `/api/v1/...` prefix. The original
+`/api/...` paths remain available for existing clients and the browser UI.
+Error responses contain a stable machine-readable `code` plus a human-readable
+`message`; clients should branch on `code`, not translated message text.
+
 ```text
 GET  /api/containers
 GET  /api/managed-containers   persistent Natbox declarations

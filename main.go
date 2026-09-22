@@ -41,6 +41,7 @@ var buildVersion = "dev"
 
 type envelope struct {
 	Success bool   `json:"success"`
+	Code    string `json:"code,omitempty"`
 	Message string `json:"message,omitempty"`
 	Data    any    `json:"data,omitempty"`
 }
@@ -189,6 +190,9 @@ func main() {
 	mux.HandleFunc("/api/reconcile/repair", a.repairReconcileAPI)
 	mux.HandleFunc("/api/containers", a.containers)
 	mux.HandleFunc("/api/containers/", a.containerAction)
+	// Keep the original /api paths for compatibility while exposing a stable
+	// versioned prefix for new clients.
+	mux.Handle("/api/v1/", versionedAPI(mux))
 	mux.HandleFunc("/", serveIndex)
 	listen := os.Getenv("NATBOX_LISTEN")
 	if listen == "" {
@@ -262,17 +266,17 @@ func (a *app) metrics(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	instances, err := a.incus.List(ctx)
 	if err != nil {
-		writeStatus(w, http.StatusServiceUnavailable, err.Error())
+		writeStatusCode(w, http.StatusServiceUnavailable, "runtime_unavailable", err.Error())
 		return
 	}
 	managed, managedErr := a.store.ListContainers(ctx)
 	if managedErr != nil {
-		writeStatus(w, http.StatusServiceUnavailable, managedErr.Error())
+		writeStatusCode(w, http.StatusServiceUnavailable, "database_unavailable", managedErr.Error())
 		return
 	}
 	host, hostErr := readHostSnapshot()
 	if hostErr != nil {
-		writeStatus(w, http.StatusServiceUnavailable, hostErr.Error())
+		writeStatusCode(w, http.StatusServiceUnavailable, "host_unavailable", hostErr.Error())
 		return
 	}
 	running := 0
@@ -1179,7 +1183,8 @@ func timeout() (context.Context, context.CancelFunc) {
 }
 func respond(w http.ResponseWriter, data any, err error) {
 	if err != nil {
-		write(w, envelope{Success: false, Message: err.Error()})
+		status, code := classifyError(err)
+		writeStatusCode(w, status, code, err.Error())
 		return
 	}
 	write(w, envelope{Success: true, Data: data})
@@ -1198,7 +1203,8 @@ func logging(next http.Handler) http.Handler {
 
 func (a *app) authMiddleware(next http.Handler, token string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/api/health" || r.URL.Path == "/api/auth/status" || r.URL.Path == "/api/auth/login" {
+		apiPath := canonicalAPIPath(r.URL.Path)
+		if !strings.HasPrefix(apiPath, "/api/") || apiPath == "/api/health" || apiPath == "/api/auth/status" || apiPath == "/api/auth/login" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -1210,11 +1216,11 @@ func (a *app) authMiddleware(next http.Handler, token string) http.Handler {
 		if a.auth.enabled() {
 			if _, ok := a.auth.session(r); !ok {
 				w.Header().Set("WWW-Authenticate", `Bearer realm="natbox"`)
-				writeStatus(w, http.StatusUnauthorized, "authentication required")
+				writeStatusCode(w, http.StatusUnauthorized, "auth_required", "authentication required")
 				return
 			}
-			if r.Method != http.MethodGet && r.Method != http.MethodHead && r.URL.Path != "/api/auth/logout" && !a.auth.csrfValid(r) {
-				writeStatus(w, http.StatusForbidden, "csrf token required")
+			if r.Method != http.MethodGet && r.Method != http.MethodHead && apiPath != "/api/auth/logout" && !a.auth.csrfValid(r) {
+				writeStatusCode(w, http.StatusForbidden, "csrf_required", "csrf token required")
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -1222,17 +1228,67 @@ func (a *app) authMiddleware(next http.Handler, token string) http.Handler {
 		}
 		if token != "" {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="natbox"`)
-			writeStatus(w, http.StatusUnauthorized, "authentication required")
+			writeStatusCode(w, http.StatusUnauthorized, "auth_required", "authentication required")
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
 }
 
+func canonicalAPIPath(path string) string {
+	if strings.HasPrefix(path, "/api/v1/") {
+		return "/api" + strings.TrimPrefix(path, "/api/v1")
+	}
+	return path
+}
+
 func writeStatus(w http.ResponseWriter, status int, message string) {
+	writeStatusCode(w, status, "request_error", message)
+}
+
+func writeStatusCode(w http.ResponseWriter, status int, code, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(envelope{Success: false, Message: message})
+	_ = json.NewEncoder(w).Encode(envelope{Success: false, Code: code, Message: message})
+}
+
+func classifyError(err error) (int, string) {
+	if err == nil {
+		return http.StatusOK, ""
+	}
+	if errors.Is(err, sql.ErrNoRows) || strings.Contains(strings.ToLower(err.Error()), "not found") || strings.Contains(strings.ToLower(err.Error()), "not managed") {
+		return http.StatusNotFound, "not_found"
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{"already exists", "already assigned", "duplicate", "conflict"} {
+		if strings.Contains(message, marker) {
+			return http.StatusConflict, "conflict"
+		}
+	}
+	for _, marker := range []string{"required", "invalid", "must be", "between", "unsupported", "confirm must", "one line"} {
+		if strings.Contains(message, marker) {
+			return http.StatusBadRequest, "invalid_request"
+		}
+	}
+	if strings.Contains(message, "incus ") || strings.Contains(message, "runtime ") || strings.Contains(message, "waiting for") {
+		return http.StatusBadGateway, "runtime_error"
+	}
+	return http.StatusInternalServerError, "internal_error"
+}
+
+func versionedAPI(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/api/v1")
+		if path == "" {
+			path = "/"
+		}
+		if !strings.HasPrefix(path, "/") {
+			path = "/" + path
+		}
+		clone := r.Clone(r.Context())
+		clone.URL.Path = "/api" + path
+		next.ServeHTTP(w, clone)
+	})
 }
 
 func isLoopbackListen(address string) bool {

@@ -5,10 +5,51 @@ info:
   description: Standalone Incus/LXD Alpine NAT container management API.
 servers:
   - url: http://127.0.0.1:8787
+    description: Local or SSH-tunnel deployment
 security:
   - bearerAuth: []
   - cookieAuth: []
 paths:
+  /api/v1/health:
+    get:
+      security: []
+      responses:
+        '200': {description: Service health}
+  /api/v1/metrics:
+    get:
+      responses:
+        '200': {description: Prometheus text exposition}
+  /api/v1/diagnostics:
+    get:
+      responses:
+        '200': {description: Runtime, host and reconciliation diagnostics}
+  /api/v1/containers:
+    get:
+      responses:
+        '200': {description: Runtime containers}
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {$ref: '#/components/schemas/CreateContainerRequest'}}
+      responses:
+        '200': {description: Container created}
+  /api/v1/containers/bulk/action:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {$ref: '#/components/schemas/BulkActionRequest'}}
+      responses:
+        '200': {description: Batch action result}
+  /api/v1/reconcile:
+    get:
+      responses:
+        '200': {description: Drift report}
+  /api/v1/reconcile/repair:
+    post:
+      responses:
+        '200': {description: Desired-state repair result}
   /api/health:
     get:
       security: []
@@ -63,6 +104,13 @@ components:
       in: cookie
       name: natbox_session
   schemas:
+    ErrorResponse:
+      type: object
+      required: [success, code, message]
+      properties:
+        success: {type: boolean, example: false}
+        code: {type: string, example: invalid_request}
+        message: {type: string}
     CreateContainerRequest:
       type: object
       required: [name, memoryLimitMb, diskLimitGb]
