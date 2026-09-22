@@ -76,6 +76,8 @@ func (a *app) enforcePolicies(ctx context.Context) {
 }
 
 func (a *app) enforcePolicyPass(ctx context.Context) {
+	a.mutationMu.Lock()
+	defer a.mutationMu.Unlock()
 	items, err := a.store.ListContainers(ctx)
 	if err != nil {
 		log.Printf("policy list: %v", err)

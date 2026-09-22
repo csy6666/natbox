@@ -3,12 +3,50 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
+	"os"
 	"sort"
 	"time"
 
 	"natbox/internal/incus"
 	"natbox/internal/store"
 )
+
+func (a *app) startAutoRepairScheduler(ctx context.Context) {
+	if os.Getenv("NATBOX_AUTO_REPAIR") != "1" {
+		return
+	}
+	interval := time.Duration(envInt("NATBOX_AUTO_REPAIR_INTERVAL_MIN", 5)) * time.Minute
+	if interval < time.Minute {
+		interval = time.Minute
+	}
+	go func() {
+		a.autoRepairPass(ctx)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				a.autoRepairPass(ctx)
+			}
+		}
+	}()
+}
+
+func (a *app) autoRepairPass(ctx context.Context) {
+	a.mutationMu.Lock()
+	defer a.mutationMu.Unlock()
+	report, err := a.reconcile(ctx)
+	if err != nil {
+		log.Printf("automatic reconcile: %v", err)
+		return
+	}
+	a.repairDrift(ctx, report, func(action, name, result, details string) {
+		a.recordSystemAudit(action, name, result, "automatic "+details)
+	})
+}
 
 type reconcileReport struct {
 	GeneratedAt       string                   `json:"generatedAt"`

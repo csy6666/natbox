@@ -70,6 +70,9 @@ NATBOX_DB=/var/lib/natbox/natbox.db
 # NATBOX_BACKUP_DIR=/var/lib/natbox/backups
 # NATBOX_BACKUP_INTERVAL_MIN=360
 # NATBOX_BACKUP_RETENTION=7
+# Optional automatic desired-state repair (disabled by default).
+# NATBOX_AUTO_REPAIR=1
+# NATBOX_AUTO_REPAIR_INTERVAL_MIN=5
 EOF
 fi
 

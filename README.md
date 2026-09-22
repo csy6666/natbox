@@ -138,6 +138,13 @@ and records cleanup failures in the audit log.
 Reconciliation also reports unreadable or duplicate public port forwards under
 `portForwardIssues`. It does not delete or rewrite port devices automatically.
 
+Runtime mutations are serialized inside one Natbox process, preventing two
+simultaneous create/port allocation requests from selecting the same capacity
+or public port. Policy enforcement and repair use the same lock. For unattended
+single-VPS operation, set `NATBOX_AUTO_REPAIR=1` and optionally
+`NATBOX_AUTO_REPAIR_INTERVAL_MIN=5`; automatic repair only starts/stops managed
+containers whose desired state drifted and writes system audit events.
+
 Install a locally built release on a Linux VPS:
 
 ```bash

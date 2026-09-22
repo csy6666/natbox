@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -30,6 +31,7 @@ type app struct {
 	store        *store.Store
 	auth         *adminAuth
 	startedAt    time.Time
+	mutationMu   sync.Mutex
 	portMin      int
 	portMax      int
 	sshPortStart int
@@ -219,6 +221,7 @@ func main() {
 	runContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go a.enforcePolicies(runContext)
+	a.startAutoRepairScheduler(runContext)
 	a.startBackupScheduler(runContext)
 	serverErrors := make(chan error, 1)
 	if certFile != "" {
@@ -310,7 +313,7 @@ func (a *app) diagnostics(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := timeout()
 	defer cancel()
-	result := map[string]any{"service": "natbox", "version": buildVersion, "uptimeSeconds": int64(time.Since(a.startedAt).Seconds())}
+	result := map[string]any{"service": "natbox", "version": buildVersion, "uptimeSeconds": int64(time.Since(a.startedAt).Seconds()), "autoRepairEnabled": os.Getenv("NATBOX_AUTO_REPAIR") == "1"}
 	capabilities, capErr := a.incus.Probe(ctx)
 	result["runtime"] = capabilities
 	if capErr != nil {
@@ -439,6 +442,8 @@ func (a *app) restoreBackup(w http.ResponseWriter, r *http.Request) {
 		method(w)
 		return
 	}
+	a.mutationMu.Lock()
+	defer a.mutationMu.Unlock()
 	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 	var request struct {
 		Confirm string       `json:"confirm"`
@@ -475,6 +480,12 @@ func (a *app) repairReconcileAPI(w http.ResponseWriter, r *http.Request) {
 		method(w)
 		return
 	}
+	a.mutationMu.Lock()
+	defer a.mutationMu.Unlock()
+	a.repairDesiredState(w, r)
+}
+
+func (a *app) repairDesiredState(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := timeout()
 	defer cancel()
 	report, err := a.reconcile(ctx)
@@ -482,6 +493,13 @@ func (a *app) repairReconcileAPI(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, err)
 		return
 	}
+	results := a.repairDrift(ctx, report, func(action, name, result, details string) {
+		a.recordAudit(r, action, "container", name, result, details)
+	})
+	respond(w, map[string]any{"repaired": results, "unmanagedUntouched": len(report.RuntimeUnmanaged), "missingUntouched": len(report.ManagedMissing)}, nil)
+}
+
+func (a *app) repairDrift(ctx context.Context, report reconcileReport, audit func(action, name, result, details string)) []map[string]any {
 	results := make([]map[string]any, 0, len(report.DesiredStateDrift))
 	for _, drift := range report.DesiredStateDrift {
 		action := "stop"
@@ -505,14 +523,14 @@ func (a *app) repairReconcileAPI(w http.ResponseWriter, r *http.Request) {
 			actionErr = stateErr
 			result = "failure"
 		}
-		a.recordAudit(r, "reconcile."+action, "container", drift.Name, result, "desired-state repair")
+		audit("reconcile."+action, drift.Name, result, "desired-state repair")
 		entry := map[string]any{"name": drift.Name, "action": action, "result": result}
 		if actionErr != nil {
 			entry["error"] = actionErr.Error()
 		}
 		results = append(results, entry)
 	}
-	respond(w, map[string]any{"repaired": results, "unmanagedUntouched": len(report.RuntimeUnmanaged), "missingUntouched": len(report.ManagedMissing)}, nil)
+	return results
 }
 
 func (a *app) recordAudit(r *http.Request, action, target, targetID, result, details string) {
@@ -597,6 +615,8 @@ func (a *app) containers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if path == "" && r.Method == http.MethodPost {
+		a.mutationMu.Lock()
+		defer a.mutationMu.Unlock()
 		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 		var req createContainerRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -650,6 +670,8 @@ func (a *app) containers(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if r.Method == http.MethodPost {
+			a.mutationMu.Lock()
+			defer a.mutationMu.Unlock()
 			r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 			var request policyRequest
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -667,6 +689,8 @@ func (a *app) containers(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if len(parts) == 2 && parts[1] == "ssh-key" && r.Method == http.MethodPost {
+		a.mutationMu.Lock()
+		defer a.mutationMu.Unlock()
 		r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 		var req struct {
 			PublicKey string `json:"publicKey"`
@@ -682,6 +706,8 @@ func (a *app) containers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(parts) == 2 && parts[1] == "ports" && r.Method == http.MethodPost {
+		a.mutationMu.Lock()
+		defer a.mutationMu.Unlock()
 		r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 		var req struct {
 			Protocol   string `json:"protocol"`
@@ -708,6 +734,8 @@ func (a *app) containers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(parts) == 2 && parts[1] == "ports" && r.Method == http.MethodDelete {
+		a.mutationMu.Lock()
+		defer a.mutationMu.Unlock()
 		protocol := r.URL.Query().Get("protocol")
 		listenPort, err := strconv.Atoi(r.URL.Query().Get("listenPort"))
 		if err != nil {
@@ -729,6 +757,8 @@ func (a *app) containers(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	a.mutationMu.Lock()
+	defer a.mutationMu.Unlock()
 	ctx, cancel := timeout()
 	defer cancel()
 	var err error
@@ -771,6 +801,8 @@ func (a *app) containers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) bulkCreate(w http.ResponseWriter, r *http.Request) {
+	a.mutationMu.Lock()
+	defer a.mutationMu.Unlock()
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	var req bulkCreateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -854,6 +886,8 @@ func (a *app) bulkCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) bulkAction(w http.ResponseWriter, r *http.Request) {
+	a.mutationMu.Lock()
+	defer a.mutationMu.Unlock()
 	r.Body = http.MaxBytesReader(w, r.Body, 32<<10)
 	var request struct {
 		Names  []string `json:"names"`
@@ -1026,6 +1060,8 @@ func (a *app) containerAction(w http.ResponseWriter, r *http.Request) {
 		a.containers(w, r)
 		return
 	}
+	a.mutationMu.Lock()
+	defer a.mutationMu.Unlock()
 	name := parts[0]
 	ctx, cancel := timeout()
 	defer cancel()
