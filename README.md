@@ -110,6 +110,24 @@ Do not commit `.env` files, administrator password hashes, bearer tokens, SSH
 keys, SQLite databases, backups, or server-specific addresses. See
 `SECURITY.md` before opening an issue.
 
+For a fresh Linux VPS, the simplest installation is:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/csy6666/natbox/main/install-online.sh | sudo sh
+```
+
+The command detects amd64/arm64, downloads the latest stable release, verifies
+both binaries with `SHA256SUMS`, installs the systemd unit, creates a protected
+default environment file, and checks the local health endpoint. To pin a
+version instead of using the latest release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/csy6666/natbox/main/install-online.sh | sudo NATBOX_VERSION=v0.1.1 sh
+```
+
+For maximum reviewability, download the script first, inspect it, then run
+`sudo sh install-online.sh`.
+
 Install a locally built release on a Linux VPS:
 
 ```bash

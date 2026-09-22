@@ -28,6 +28,7 @@ jobs:
             GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.buildVersion=$version" -o "dist/natbox-$os-$arch" .
             GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "dist/natbox-hash-$os-$arch" ./cmd/natbox-hash
           done
+          cp install-online.sh natbox.service dist/
           (cd dist && sha256sum natbox-* > SHA256SUMS)
       - uses: softprops/action-gh-release@v2
         with:
