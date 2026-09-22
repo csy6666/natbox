@@ -63,6 +63,30 @@ func TestCreateUsesStructuredArguments(t *testing.T) {
 	}
 }
 
+type failingCreateRunner struct {
+	calls [][]string
+}
+
+func (f *failingCreateRunner) Run(_ context.Context, args ...string) (string, string, error) {
+	f.calls = append(f.calls, append([]string(nil), args...))
+	if len(args) >= 3 && args[0] == "config" && args[1] == "device" {
+		return "", "disk failed", errors.New("disk failed")
+	}
+	return "", "", nil
+}
+
+func TestCreateRollsBackAfterConfigurationFailure(t *testing.T) {
+	f := &failingCreateRunner{}
+	c, _ := New(f)
+	err := c.Create(context.Background(), InstanceSpec{Name: "nat01", Image: "images:alpine/3.20", MemoryBytes: 120 * 1024 * 1024, RootDiskBytes: 1024 * 1024 * 1024})
+	if err == nil {
+		t.Fatal("expected configuration failure")
+	}
+	if len(f.calls) != 3 || !reflect.DeepEqual(f.calls[2], []string{"delete", "nat01", "--force"}) {
+		t.Fatalf("rollback calls = %#v", f.calls)
+	}
+}
+
 func TestWaitIPv4(t *testing.T) {
 	f := &fakeRunner{outputs: map[string]string{
 		"list --format=json": `[{"name":"nat01","state":{"network":{"eth0":{"addresses":[{"family":"inet","address":"10.88.0.12","scope":"global"}]}}}}]`,

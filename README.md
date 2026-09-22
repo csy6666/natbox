@@ -128,6 +128,16 @@ curl -fsSL https://raw.githubusercontent.com/csy6666/natbox/main/install-online.
 For maximum reviewability, download the script first, inspect it, then run
 `sudo sh install-online.sh`.
 
+The installer intentionally checks that `systemd` and a usable Incus/LXD
+runtime already exist. It does not run `incus admin init` automatically because
+storage pools and bridge/NAT choices can change the VPS network. After a
+runtime-side failure during container creation, Natbox attempts to delete the
+new instance; batch creation rolls back all instances created by that request
+and records cleanup failures in the audit log.
+
+Reconciliation also reports unreadable or duplicate public port forwards under
+`portForwardIssues`. It does not delete or rewrite port devices automatically.
+
 Install a locally built release on a Linux VPS:
 
 ```bash

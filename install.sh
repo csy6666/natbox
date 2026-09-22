@@ -10,6 +10,21 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
+if ! command -v systemctl >/dev/null 2>&1; then
+  echo "systemd/systemctl is required" >&2
+  exit 1
+fi
+runtime=${NATBOX_RUNTIME:-}
+if [ -z "$runtime" ]; then
+  if command -v incus >/dev/null 2>&1; then runtime=incus
+  elif command -v lxc >/dev/null 2>&1; then runtime=lxc
+  fi
+fi
+if [ -z "$runtime" ] || ! "$runtime" version >/dev/null 2>&1; then
+  echo "usable Incus/LXD runtime is required; initialize it before installing Natbox" >&2
+  exit 1
+fi
+
 mkdir -p "$install_dir" /etc/natbox "$state_dir" "$state_dir/upgrade-backups"
 
 install_atomic() {

@@ -615,6 +615,9 @@ func (a *app) containers(w http.ResponseWriter, r *http.Request) {
 		err := a.createOne(ctx, req)
 		if err == nil {
 			err = a.persistManaged(ctx, req)
+			if err != nil {
+				a.cleanupContainer(ctx, req.Name)
+			}
 		}
 		if err != nil {
 			a.recordAudit(r, "container.create", "container", req.Name, "failure", "")
@@ -818,14 +821,17 @@ func (a *app) bulkCreate(w http.ResponseWriter, r *http.Request) {
 		createReq := createContainerRequest{Name: name, Image: req.Image, CPULimit: req.CPULimit, MemoryLimitMb: req.MemoryLimitMb, DiskLimitGb: req.DiskLimitGb, PublicKey: req.PublicKey}
 		if err := a.createOne(ctx, createReq); err != nil {
 			a.recordAudit(r, "container.create", "container", name, "failure", "runtime create")
+			a.rollbackBulk(ctx, result.Created)
 			result.Failed = name
-			write(w, envelope{Success: false, Message: fmt.Sprintf("批量创建在 %s 处失败，已创建实例未回滚: %v", name, err), Data: result})
+			write(w, envelope{Success: false, Code: "bulk_create_rolled_back", Message: fmt.Sprintf("批量创建在 %s 处失败，已回滚已创建实例: %v", name, err), Data: result})
 			return
 		}
 		if err := a.persistManaged(ctx, createReq); err != nil {
+			a.cleanupContainer(ctx, name)
+			a.rollbackBulk(ctx, result.Created)
 			result.Failed = name
 			a.recordAudit(r, "container.create", "container", name, "failure", "metadata persistence")
-			write(w, envelope{Success: false, Message: fmt.Sprintf("实例 %s 已创建，但管理数据保存失败，已创建实例未回滚: %v", name, err), Data: result})
+			write(w, envelope{Success: false, Code: "bulk_create_rolled_back", Message: fmt.Sprintf("实例 %s 管理数据保存失败，已回滚已创建实例: %v", name, err), Data: result})
 			return
 		}
 		a.recordAudit(r, "container.create", "container", name, "success", fmt.Sprintf("image=%s memoryLimitMb=%d diskLimitGb=%d cpuLimit=%s", createReq.Image, createReq.MemoryLimitMb, createReq.DiskLimitGb, createReq.CPULimit))
@@ -834,8 +840,10 @@ func (a *app) bulkCreate(w http.ResponseWriter, r *http.Request) {
 			forward, sshErr := a.allocateSSH(ctx, name)
 			if sshErr != nil {
 				a.recordAudit(r, "port.allocate_ssh", "container", name, "failure", "batch allocation")
+				a.cleanupContainer(ctx, name)
+				a.rollbackBulk(ctx, result.Created)
 				result.Failed = name
-				write(w, envelope{Success: false, Message: fmt.Sprintf("实例 %s 已创建，但 SSH 端口分配失败，已创建实例未回滚: %v", name, sshErr), Data: result})
+				write(w, envelope{Success: false, Code: "bulk_create_rolled_back", Message: fmt.Sprintf("实例 %s SSH 端口分配失败，已回滚已创建实例: %v", name, sshErr), Data: result})
 				return
 			}
 			entry["ssh"] = forward
@@ -932,12 +940,34 @@ func (a *app) createOne(ctx context.Context, req createContainerRequest) error {
 		return err
 	}
 	if _, err := a.incus.WaitIPv4(ctx, req.Name); err != nil {
+		a.cleanupContainer(ctx, req.Name)
 		return err
 	}
 	if strings.TrimSpace(req.PublicKey) != "" {
-		return a.incus.ConfigureSSH(ctx, req.Name, req.PublicKey)
+		if err := a.incus.ConfigureSSH(ctx, req.Name, req.PublicKey); err != nil {
+			a.cleanupContainer(ctx, req.Name)
+			return err
+		}
 	}
 	return nil
+}
+
+func (a *app) cleanupContainer(ctx context.Context, name string) {
+	if err := a.incus.Delete(ctx, name); err != nil {
+		log.Printf("cleanup container %s: %v", name, err)
+		a.recordSystemAudit("container.cleanup", name, "failure", err.Error())
+		return
+	}
+	a.recordSystemAudit("container.cleanup", name, "success", "automatic rollback")
+}
+
+func (a *app) rollbackBulk(ctx context.Context, created []map[string]any) {
+	for _, entry := range created {
+		name, _ := entry["name"].(string)
+		if name != "" {
+			a.cleanupContainer(ctx, name)
+		}
+	}
 }
 
 func validateCreateRequest(req createContainerRequest) error {

@@ -292,13 +292,29 @@ func (c *Client) Create(ctx context.Context, s InstanceSpec) error {
 	if _, stderr, err := c.run(ctx, args...); err != nil {
 		return commandError("init", err, stderr)
 	}
+	created := true
+	rollback := func() {
+		if !created {
+			return
+		}
+		rollbackContext, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if _, stderr, err := c.run(rollbackContext, "delete", s.Name, "--force"); err != nil {
+			// Preserve the original failure. The caller will report that cleanup
+			// may need manual attention if the runtime also rejects deletion.
+			_ = stderr
+		}
+	}
 	if _, stderr, err := c.run(ctx, "config", "device", "override", s.Name, "root", "size="+bytesValue(s.RootDiskBytes)); err != nil {
+		rollback()
 		return commandError("set disk", err, stderr)
 	}
 	if _, stderr, err := c.run(ctx, "config", "set", s.Name, "boot.autostart", "true"); err != nil {
+		rollback()
 		return commandError("enable autostart", err, stderr)
 	}
 	if _, stderr, err := c.run(ctx, "start", s.Name); err != nil {
+		rollback()
 		return commandError("start", err, stderr)
 	}
 	return nil
