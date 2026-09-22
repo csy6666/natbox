@@ -29,11 +29,16 @@ type app struct {
 	incus        *incus.Client
 	store        *store.Store
 	auth         *adminAuth
+	startedAt    time.Time
 	portMin      int
 	portMax      int
 	sshPortStart int
 	sshPortEnd   int
 }
+
+// buildVersion is overridden by release builds with -ldflags.
+var buildVersion = "dev"
+
 type envelope struct {
 	Success bool   `json:"success"`
 	Message string `json:"message,omitempty"`
@@ -148,7 +153,7 @@ func main() {
 		log.Fatal(err)
 	}
 	defer database.Close()
-	a := &app{incus: client, store: database}
+	a := &app{incus: client, store: database, startedAt: time.Now().UTC()}
 	authManager, err := newAdminAuth(os.Getenv("NATBOX_ADMIN_PASSWORD_HASH"))
 	if err != nil {
 		log.Fatal("invalid NATBOX_ADMIN_PASSWORD_HASH: ", err)
@@ -166,6 +171,8 @@ func main() {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", a.health)
+	mux.HandleFunc("/api/metrics", a.metrics)
+	mux.HandleFunc("/api/diagnostics", a.diagnostics)
 	mux.HandleFunc("/api/auth/status", a.authStatus)
 	mux.HandleFunc("/api/auth/login", a.authLogin)
 	mux.HandleFunc("/api/auth/logout", a.authLogout)
@@ -179,6 +186,7 @@ func main() {
 	mux.HandleFunc("/api/backup", a.backup)
 	mux.HandleFunc("/api/backup/restore", a.restoreBackup)
 	mux.HandleFunc("/api/reconcile", a.reconcileAPI)
+	mux.HandleFunc("/api/reconcile/repair", a.repairReconcileAPI)
 	mux.HandleFunc("/api/containers", a.containers)
 	mux.HandleFunc("/api/containers/", a.containerAction)
 	mux.HandleFunc("/", serveIndex)
@@ -194,9 +202,12 @@ func main() {
 	if (certFile == "") != (keyFile == "") {
 		log.Fatal("NATBOX_TLS_CERT and NATBOX_TLS_KEY must be set together")
 	}
+	if os.Getenv("NATBOX_REQUIRE_TLS") == "1" && certFile == "" {
+		log.Fatal("NATBOX_REQUIRE_TLS=1 requires NATBOX_TLS_CERT and NATBOX_TLS_KEY")
+	}
 	server := &http.Server{
 		Addr:              listen,
-		Handler:           logging(a.authMiddleware(mux, token)),
+		Handler:           securityHeaders(logging(a.authMiddleware(mux, token))),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    16 << 10,
@@ -239,7 +250,83 @@ func databasePath() string {
 }
 
 func (a *app) health(w http.ResponseWriter, r *http.Request) {
-	write(w, envelope{Success: true, Data: map[string]string{"service": "natbox"}})
+	write(w, envelope{Success: true, Data: map[string]any{"service": "natbox", "version": buildVersion, "uptimeSeconds": int64(time.Since(a.startedAt).Seconds())}})
+}
+
+func (a *app) metrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		method(w)
+		return
+	}
+	ctx, cancel := timeout()
+	defer cancel()
+	instances, err := a.incus.List(ctx)
+	if err != nil {
+		writeStatus(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	managed, managedErr := a.store.ListContainers(ctx)
+	if managedErr != nil {
+		writeStatus(w, http.StatusServiceUnavailable, managedErr.Error())
+		return
+	}
+	host, hostErr := readHostSnapshot()
+	if hostErr != nil {
+		writeStatus(w, http.StatusServiceUnavailable, hostErr.Error())
+		return
+	}
+	running := 0
+	for _, instance := range instances {
+		if instance.Status == "Running" {
+			running++
+		}
+	}
+	policyCount := 0
+	for _, item := range managed {
+		if item.QuotaBytes > 0 || item.ExpiresAt != "" {
+			policyCount++
+		}
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	f := func(name string, value any) { fmt.Fprintf(w, "%s %v\n", name, value) }
+	f("natbox_up", 1)
+	f("natbox_build_info{version=\""+prometheusLabel(buildVersion)+"\"}", 1)
+	f("natbox_managed_containers", len(managed))
+	f("natbox_runtime_containers", len(instances))
+	f("natbox_running_containers", running)
+	f("natbox_policy_enforced_containers", policyCount)
+	f("natbox_host_memory_available_bytes", host.MemoryAvailableBytes)
+	f("natbox_host_disk_available_bytes", host.DiskAvailableBytes)
+}
+
+func (a *app) diagnostics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		method(w)
+		return
+	}
+	ctx, cancel := timeout()
+	defer cancel()
+	result := map[string]any{"service": "natbox", "version": buildVersion, "uptimeSeconds": int64(time.Since(a.startedAt).Seconds())}
+	capabilities, capErr := a.incus.Probe(ctx)
+	result["runtime"] = capabilities
+	if capErr != nil {
+		result["runtimeError"] = capErr.Error()
+	}
+	if host, hostErr := readHostSnapshot(); hostErr == nil {
+		result["host"] = a.hostView(host)
+	} else {
+		result["hostError"] = hostErr.Error()
+	}
+	if report, reconcileErr := a.reconcile(ctx); reconcileErr == nil {
+		result["reconcile"] = report
+	} else {
+		result["reconcileError"] = reconcileErr.Error()
+	}
+	if _, ok := result["runtimeError"]; ok {
+		write(w, envelope{Success: false, Message: "runtime diagnostics failed", Data: result})
+		return
+	}
+	write(w, envelope{Success: true, Data: result})
 }
 
 func (a *app) authStatus(w http.ResponseWriter, r *http.Request) {
@@ -379,6 +466,51 @@ func (a *app) reconcileAPI(w http.ResponseWriter, r *http.Request) {
 	respond(w, report, err)
 }
 
+func (a *app) repairReconcileAPI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		method(w)
+		return
+	}
+	ctx, cancel := timeout()
+	defer cancel()
+	report, err := a.reconcile(ctx)
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	results := make([]map[string]any, 0, len(report.DesiredStateDrift))
+	for _, drift := range report.DesiredStateDrift {
+		action := "stop"
+		if drift.DesiredState == "running" {
+			action = "start"
+		}
+		var actionErr error
+		switch action {
+		case "start":
+			actionErr = a.incus.Start(ctx, drift.Name)
+			if actionErr == nil {
+				_, actionErr = a.incus.WaitIPv4(ctx, drift.Name)
+			}
+		case "stop":
+			actionErr = a.incus.Stop(ctx, drift.Name)
+		}
+		result := "success"
+		if actionErr != nil {
+			result = "failure"
+		} else if stateErr := a.store.SetDesiredState(ctx, drift.Name, drift.DesiredState); stateErr != nil && stateErr != sql.ErrNoRows {
+			actionErr = stateErr
+			result = "failure"
+		}
+		a.recordAudit(r, "reconcile."+action, "container", drift.Name, result, "desired-state repair")
+		entry := map[string]any{"name": drift.Name, "action": action, "result": result}
+		if actionErr != nil {
+			entry["error"] = actionErr.Error()
+		}
+		results = append(results, entry)
+	}
+	respond(w, map[string]any{"repaired": results, "unmanagedUntouched": len(report.RuntimeUnmanaged), "missingUntouched": len(report.ManagedMissing)}, nil)
+}
+
 func (a *app) recordAudit(r *http.Request, action, target, targetID, result, details string) {
 	if a.store == nil {
 		return
@@ -423,6 +555,10 @@ func (a *app) containers(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(path, "/")
 	if path == "bulk" && r.Method == http.MethodPost {
 		a.bulkCreate(w, r)
+		return
+	}
+	if path == "bulk/action" && r.Method == http.MethodPost {
+		a.bulkAction(w, r)
 		return
 	}
 	if path == "" && r.Method == http.MethodGet {
@@ -703,6 +839,78 @@ func (a *app) bulkCreate(w http.ResponseWriter, r *http.Request) {
 		result.Created = append(result.Created, entry)
 	}
 	respond(w, result, nil)
+}
+
+func (a *app) bulkAction(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 32<<10)
+	var request struct {
+		Names  []string `json:"names"`
+		Action string   `json:"action"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		respond(w, nil, err)
+		return
+	}
+	if len(request.Names) < 1 || len(request.Names) > 32 {
+		respond(w, nil, errors.New("names must contain between 1 and 32 containers"))
+		return
+	}
+	switch request.Action {
+	case "start", "stop", "restart", "delete":
+	default:
+		respond(w, nil, errors.New("action must be start, stop, restart, or delete"))
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	seen := make(map[string]bool, len(request.Names))
+	results := make([]map[string]any, 0, len(request.Names))
+	for _, name := range request.Names {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		var actionErr error
+		switch request.Action {
+		case "start":
+			actionErr = a.incus.Start(ctx, name)
+			if actionErr == nil {
+				_, actionErr = a.incus.WaitIPv4(ctx, name)
+			}
+		case "stop":
+			actionErr = a.incus.Stop(ctx, name)
+		case "restart":
+			actionErr = a.incus.Restart(ctx, name)
+			if actionErr == nil {
+				_, actionErr = a.incus.WaitIPv4(ctx, name)
+			}
+		case "delete":
+			actionErr = a.incus.Delete(ctx, name)
+			if actionErr == nil {
+				actionErr = a.store.DeleteContainer(ctx, name)
+			}
+		}
+		result := "success"
+		if actionErr != nil {
+			result = "failure"
+		} else if request.Action != "delete" {
+			desired := "stopped"
+			if request.Action != "stop" {
+				desired = "running"
+			}
+			if stateErr := a.store.SetDesiredState(ctx, name, desired); stateErr != nil && stateErr != sql.ErrNoRows {
+				actionErr = stateErr
+				result = "failure"
+			}
+		}
+		a.recordAudit(r, "container."+request.Action, "container", name, result, "bulk action")
+		entry := map[string]any{"name": name, "action": request.Action, "result": result}
+		if actionErr != nil {
+			entry["error"] = actionErr.Error()
+		}
+		results = append(results, entry)
+	}
+	respond(w, map[string]any{"results": results}, nil)
 }
 
 func (a *app) persistManaged(ctx context.Context, req createContainerRequest) error {
@@ -1037,6 +1245,25 @@ func isLoopbackListen(address string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		if r.TLS != nil {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000")
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func prometheusLabel(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, `"`, `\"`)
+	return strings.ReplaceAll(value, "\n", "")
 }
 func serveIndex(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {

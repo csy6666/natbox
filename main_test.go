@@ -1,6 +1,8 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -51,5 +53,30 @@ func TestValidateCreateRequest(t *testing.T) {
 	invalid.CPULimit = "0%"
 	if err := validateCreateRequest(invalid); err == nil {
 		t.Fatal("expected CPU validation error")
+	}
+}
+
+func TestPrometheusLabel(t *testing.T) {
+	if got := prometheusLabel("release\\\"1\n"); got != `release\\\"1` {
+		t.Fatalf("prometheusLabel = %q", got)
+	}
+}
+
+func TestSecurityHeaders(t *testing.T) {
+	handler := securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	for key, want := range map[string]string{
+		"X-Content-Type-Options": "nosniff",
+		"X-Frame-Options":        "DENY",
+		"Referrer-Policy":        "no-referrer",
+		"Permissions-Policy":     "camera=(), microphone=(), geolocation=()",
+	} {
+		if got := response.Header().Get(key); got != want {
+			t.Fatalf("%s = %q, want %q", key, got, want)
+		}
 	}
 }

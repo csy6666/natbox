@@ -3,16 +3,26 @@ set -eu
 
 install_dir=/opt/natbox
 service_file=/etc/systemd/system/natbox.service
+state_dir=/var/lib/natbox
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "run as root" >&2
   exit 1
 fi
 
-mkdir -p "$install_dir" /etc/natbox /var/lib/natbox
-install -m 0755 natbox "$install_dir/natbox"
+mkdir -p "$install_dir" /etc/natbox "$state_dir" "$state_dir/upgrade-backups"
+
+install_atomic() {
+  source=$1
+  target=$2
+  temporary="$target.tmp.$$"
+  install -m 0755 "$source" "$temporary"
+  mv -f "$temporary" "$target"
+}
+
+install_atomic natbox "$install_dir/natbox"
 if [ -f natbox-hash ]; then
-  install -m 0755 natbox-hash "$install_dir/natbox-hash"
+  install_atomic natbox-hash "$install_dir/natbox-hash"
 fi
 install -m 0644 natbox.service "$service_file"
 
@@ -26,6 +36,8 @@ NATBOX_DB=/var/lib/natbox/natbox.db
 # NATBOX_ADMIN_PASSWORD_HASH=$argon2id$v=19$m=65536,t=3,p=2$...
 # Set NATBOX_COOKIE_SECURE=1 when serving HTTPS.
 # NATBOX_COOKIE_SECURE=1
+# Set to 1 to refuse plaintext listeners; requires both TLS paths below.
+# NATBOX_REQUIRE_TLS=1
 # For direct non-loopback access, set a random token of at least 16 characters.
 # NATBOX_TOKEN=replace-with-a-long-random-token
 # Optional public port policy. The SSH allocator uses the SSH range below.
@@ -48,4 +60,9 @@ fi
 
 systemctl daemon-reload
 systemctl enable --now natbox.service
-systemctl --no-pager --full status natbox.service || true
+if ! systemctl is-active --quiet natbox.service; then
+  systemctl --no-pager --full status natbox.service || true
+  echo "natbox.service did not become active" >&2
+  exit 1
+fi
+systemctl --no-pager --full status natbox.service

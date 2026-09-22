@@ -85,3 +85,45 @@ Backups contain only Natbox managed declarations. Restore is intentionally metad
 Quota enforcement runs once per minute. `quotaBytes=0` disables the traffic limit and an empty `expiresAt` disables expiry. A policy update records current runtime receive/send counters as the baseline, so earlier traffic is not charged to the new policy. When a limit is reached, Natbox stops the container, changes its desired state to `stopped`, and writes an audit event; it never deletes the instance.
 
 For direct HTTPS, set both `NATBOX_TLS_CERT` and `NATBOX_TLS_KEY` in `/etc/natbox/natbox.env`. Non-loopback listeners still require `NATBOX_TOKEN` with at least 16 characters. A reverse proxy with its own certificate and access control remains the preferred public deployment.
+
+Production operations
+---------------------
+
+The service exposes `GET /api/metrics` in Prometheus text format and `GET /api/diagnostics` for runtime, host, and reconciliation checks. Both follow the normal Natbox authentication policy. `POST /api/reconcile/repair` repairs only desired-state drift for managed containers; unmanaged and missing instances are reported but left untouched.
+
+`POST /api/containers/bulk/action` accepts `{"names":["nat01","nat02"],"action":"restart"}`. Supported actions are `start`, `stop`, `restart`, and `delete`. Each item is audited independently and the response includes per-item errors.
+
+Set `NATBOX_REQUIRE_TLS=1` to refuse a plaintext listener. This requires `NATBOX_TLS_CERT` and `NATBOX_TLS_KEY`. Natbox also sends browser security headers, and the systemd unit applies filesystem, privilege, and address-family restrictions. Review `natbox.service` if your runtime needs additional capabilities.
+
+The repository includes `openapi.yaml`, a CI workflow for tests/vet and Linux amd64/arm64 builds, and a tag-triggered release workflow. Release artifacts include `natbox`, `natbox-hash`, and `SHA256SUMS`.
+
+Public deployment and upgrades
+------------------------------
+
+The repository is intended to be public, but deployment secrets remain local.
+Do not commit `.env` files, administrator password hashes, bearer tokens, SSH
+keys, SQLite databases, backups, or server-specific addresses. See
+`SECURITY.md` before opening an issue.
+
+Install a locally built release on a Linux VPS:
+
+```bash
+sudo ./install.sh
+```
+
+The installer replaces binaries atomically, preserves `/etc/natbox/natbox.env`,
+and fails if the systemd service does not become active. After publishing a
+GitHub Release, upgrade an existing installation with:
+
+```bash
+sudo NATBOX_VERSION=1.0.0 ./upgrade.sh
+```
+
+Leaving `NATBOX_VERSION` unset downloads the latest release. The script selects
+amd64 or arm64, verifies `SHA256SUMS`, backs up the current binary, restarts the
+service, checks `/api/health`, and restores the previous binary if startup or
+health verification fails. It does not modify the SQLite database or the
+Natbox environment file.
+
+To publish a release, create and push a tag such as `v1.0.0`; GitHub Actions
+builds Linux amd64/arm64 artifacts and creates the release automatically.

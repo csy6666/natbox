@@ -1,0 +1,81 @@
+openapi: 3.0.3
+info:
+  title: Natbox API
+  version: 1.0.0
+  description: Standalone Incus/LXD Alpine NAT container management API.
+servers:
+  - url: http://127.0.0.1:8787
+security:
+  - bearerAuth: []
+  - cookieAuth: []
+paths:
+  /api/health:
+    get:
+      security: []
+      responses:
+        '200': {description: Service health}
+  /api/metrics:
+    get:
+      responses:
+        '200': {description: Prometheus text exposition}
+  /api/diagnostics:
+    get:
+      responses:
+        '200': {description: Runtime, host and reconciliation diagnostics}
+  /api/containers:
+    get:
+      responses:
+        '200': {description: Runtime containers}
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {$ref: '#/components/schemas/CreateContainerRequest'}}
+      responses:
+        '200': {description: Container created}
+  /api/containers/bulk:
+    post:
+      responses:
+        '200': {description: Batch creation result}
+  /api/containers/bulk/action:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {$ref: '#/components/schemas/BulkActionRequest'}}
+      responses:
+        '200': {description: Batch action result}
+  /api/reconcile:
+    get:
+      responses:
+        '200': {description: Drift report}
+  /api/reconcile/repair:
+    post:
+      responses:
+        '200': {description: Desired-state repair result}
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: natbox_session
+  schemas:
+    CreateContainerRequest:
+      type: object
+      required: [name, memoryLimitMb, diskLimitGb]
+      properties:
+        name: {type: string}
+        image: {type: string, default: images:alpine/3.24}
+        memoryLimitMb: {type: integer, minimum: 16, maximum: 8192}
+        diskLimitGb: {type: integer, minimum: 1, maximum: 100}
+        cpuLimit: {type: string, example: 12%}
+        publicKey: {type: string}
+    BulkActionRequest:
+      type: object
+      required: [names, action]
+      properties:
+        names: {type: array, maxItems: 32, items: {type: string}}
+        action: {type: string, enum: [start, stop, restart, delete]}
