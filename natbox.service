@@ -1,0 +1,19 @@
+[Unit]
+Description=Natbox Incus NAT container manager
+After=network-online.target incus.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/natbox
+ExecStart=/opt/natbox/natbox
+EnvironmentFile=-/etc/natbox/natbox.env
+Restart=on-failure
+RestartSec=2
+UMask=0077
+LimitNOFILE=65536
+TimeoutStopSec=15
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target

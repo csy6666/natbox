@@ -1,0 +1,10 @@
+natbox
+natbox.exe
+natbox-*.exe
+natbox-linux-*
+natbox-hash-linux-*
+SHA256SUMS
+*.db
+*.db-wal
+*.db-shm
+.xui-*
