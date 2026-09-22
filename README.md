@@ -122,7 +122,7 @@ default environment file, and checks the local health endpoint. To pin a
 version instead of using the latest release:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/csy6666/natbox/main/install-online.sh | sudo NATBOX_VERSION=v0.1.1 sh
+curl -fsSL https://raw.githubusercontent.com/csy6666/natbox/main/install-online.sh | sudo NATBOX_VERSION=v0.1.2 sh
 ```
 
 For maximum reviewability, download the script first, inspect it, then run
