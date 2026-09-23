@@ -87,7 +87,7 @@ For automatic database snapshots, set `NATBOX_BACKUP_DIR` (for example `/var/lib
 
 Backups contain only Natbox managed declarations. Restore is intentionally metadata-only: it does not create, delete, start, stop, or reconfigure LXD instances. Use `/api/reconcile` after restore to identify managed records missing from the runtime, runtime instances not managed by Natbox, and desired-state drift. Audit history is not overwritten by restore.
 
-Quota enforcement runs once per minute. `quotaBytes=0` disables the traffic limit and an empty `expiresAt` disables expiry. A policy update records current runtime receive/send counters as the baseline, so earlier traffic is not charged to the new policy. When a limit is reached, Natbox stops the container, changes its desired state to `stopped`, and writes an audit event; it never deletes the instance.
+Quota enforcement samples once per minute. `quotaBytes=0` disables the traffic limit and an empty `expiresAt` disables expiry. A policy update records current runtime receive/send counters as the baseline, so earlier traffic is not charged to the new policy. When a limit is reached, Natbox stops the container, changes its desired state to `stopped`, and writes an audit event; it never deletes the instance. This is a soft limit: traffic can exceed the configured quota between samples by the traffic received during the sampling interval, and no exact hard-cap guarantee is made. If a runtime stats read fails, Natbox logs the failure and leaves the container running for that pass (fail-open) so a transient control-plane error does not stop user workloads.
 
 For direct HTTPS, set both `NATBOX_TLS_CERT` and `NATBOX_TLS_KEY` in `/etc/natbox/natbox.env`. Non-loopback listeners still require `NATBOX_TOKEN` with at least 16 characters. A reverse proxy with its own certificate and access control remains the preferred public deployment.
 
@@ -101,6 +101,8 @@ The service exposes `GET /api/metrics` in Prometheus text format and `GET /api/d
 Set `NATBOX_REQUIRE_TLS=1` to refuse a plaintext listener. This requires `NATBOX_TLS_CERT` and `NATBOX_TLS_KEY`. Natbox also sends browser security headers, and the systemd unit applies filesystem, privilege, and address-family restrictions. Review `natbox.service` if your runtime needs additional capabilities.
 
 The repository includes `openapi.yaml`, a CI workflow for tests/vet and Linux amd64/arm64 builds, and a tag-triggered release workflow. Release artifacts include `natbox`, `natbox-hash`, and `SHA256SUMS`.
+
+The opt-in Incus/LXD lifecycle and real TCP/UDP forwarding acceptance procedure is documented in [`docs/runtime-integration.md`](docs/runtime-integration.md). The repeatable release gates are listed in [`docs/release-checklist.md`](docs/release-checklist.md). Runtime acceptance requires a dedicated empty test project and does not run in the default CI suite.
 
 Public deployment and upgrades
 ------------------------------

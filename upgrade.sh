@@ -44,14 +44,23 @@ esac
 temporary_dir=$(mktemp -d)
 backup_path=""
 hash_backup_path=""
-cleanup() { rm -rf "$temporary_dir"; }
+binary_temporary="$binary.tmp.$$"
+hash_temporary="$hash_binary.tmp.$$"
+cleanup() {
+  rm -rf "$temporary_dir"
+  rm -f "$binary_temporary" "$hash_temporary"
+}
 rollback() {
   if [ -n "$backup_path" ] && [ -f "$backup_path" ]; then
     install -m 0755 "$backup_path" "$binary"
-    if [ -n "$hash_backup_path" ] && [ -f "$hash_backup_path" ]; then
-      install -m 0755 "$hash_backup_path" "$hash_binary"
-    fi
     systemctl restart "$service_name" >/dev/null 2>&1 || true
+  elif [ -e "$binary" ]; then
+    rm -f "$binary"
+  fi
+  if [ -n "$hash_backup_path" ] && [ -f "$hash_backup_path" ]; then
+    install -m 0755 "$hash_backup_path" "$hash_binary"
+  elif [ -e "$hash_binary" ]; then
+    rm -f "$hash_binary"
   fi
 }
 trap cleanup EXIT
@@ -61,20 +70,37 @@ download "https://github.com/$repo/releases/$release_path/natbox-linux-$arch" "$
 download "https://github.com/$repo/releases/$release_path/natbox-hash-linux-$arch" "$temporary_dir/natbox-hash"
 download "https://github.com/$repo/releases/$release_path/SHA256SUMS" "$temporary_dir/SHA256SUMS"
 
-expected=$(awk -v file="natbox-linux-$arch" '$2 == file || $2 == "*" file {print $1; exit}' "$temporary_dir/SHA256SUMS")
-if [ -z "$expected" ]; then
-  echo "release checksum for natbox-linux-$arch was not found" >&2
-  exit 1
-fi
-if command -v sha256sum >/dev/null 2>&1; then
-  actual=$(sha256sum "$temporary_dir/natbox" | awk '{print $1}')
-else
-  actual=$(shasum -a 256 "$temporary_dir/natbox" | awk '{print $1}')
-fi
-if [ "$actual" != "$expected" ]; then
-  echo "checksum verification failed" >&2
-  exit 1
-fi
+checksum_file() {
+  file=$1
+  asset=$2
+  expected=$(awk -v file="$asset" '$2 == file || $2 == "*" file {print $1; exit}' "$temporary_dir/SHA256SUMS")
+  case "$expected" in
+    ""|*[!0123456789abcdefABCDEF]*)
+      echo "release checksum for $asset is missing or invalid" >&2
+      return 1
+      ;;
+  esac
+  if [ "${#expected}" -ne 64 ]; then
+    echo "release checksum for $asset is missing or invalid" >&2
+    return 1
+  fi
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual=$(sha256sum "$file" | awk '{print $1}')
+  elif command -v shasum >/dev/null 2>&1; then
+    actual=$(shasum -a 256 "$file" | awk '{print $1}')
+  else
+    echo "sha256sum or shasum is required" >&2
+    return 1
+  fi
+  expected=$(printf '%s' "$expected" | tr 'ABCDEF' 'abcdef')
+  if [ "$actual" != "$expected" ]; then
+    echo "checksum verification failed for $asset" >&2
+    return 1
+  fi
+}
+
+checksum_file "$temporary_dir/natbox" "natbox-linux-$arch"
+checksum_file "$temporary_dir/natbox-hash" "natbox-hash-linux-$arch"
 
 timestamp=$(date -u +%Y%m%dT%H%M%SZ)
 if [ -f "$binary" ]; then
@@ -87,12 +113,12 @@ if [ -f "$hash_binary" ]; then
 fi
 
 systemctl stop "$service_name"
-if ! install -m 0755 "$temporary_dir/natbox" "$binary.tmp.$$" || ! mv -f "$binary.tmp.$$" "$binary"; then
+if ! install -m 0755 "$temporary_dir/natbox" "$binary_temporary" || ! mv -f "$binary_temporary" "$binary"; then
   rollback
   echo "could not replace Natbox binary; previous binary restored" >&2
   exit 1
 fi
-if ! install -m 0755 "$temporary_dir/natbox-hash" "$hash_binary.tmp.$$" || ! mv -f "$hash_binary.tmp.$$" "$hash_binary"; then
+if ! install -m 0755 "$temporary_dir/natbox-hash" "$hash_temporary" || ! mv -f "$hash_temporary" "$hash_binary"; then
   rollback
   echo "could not replace natbox-hash; previous binaries restored" >&2
   exit 1

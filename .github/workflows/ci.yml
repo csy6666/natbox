@@ -19,6 +19,12 @@ jobs:
       - run: go test ./... -count=1
       - run: go vet ./...
       - run: test -z "$(gofmt -l $(git ls-files '*.go'))"
+      - name: Validate shell scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          sh -n upgrade.sh install.sh install-online.sh tests/*.sh
+          sh tests/upgrade_test.sh
 
   build:
     needs: test
